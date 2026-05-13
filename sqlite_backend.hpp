@@ -1,0 +1,96 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/// @file   plugins/handlers/store/sqlite_backend.hpp
+/// @brief  File-backed IStore using SQLite. Slice 2.
+///
+/// One table `store(key BLOB PRIMARY KEY, value BLOB, timestamp_us
+/// INTEGER, ttl_s INTEGER, flags INTEGER)`. Prepared statements
+/// cached on the connection per legacy `apps/store/sqlite_backend.cpp`
+/// — handler dispatch hits sqlite at the rate the wire delivers, so
+/// statement parsing per request is a measurable hot path.
+///
+/// Production deployments file the DB at `~/.local/share/goodnet/
+/// store.sqlite3` or wherever the manifest's `store.db_path` config
+/// resolves to. Tests pass `":memory:"` for full isolation.
+
+#pragma once
+
+#include "store.hpp"
+
+#include <sqlite3.h>
+
+#include <cstdint>
+#include <mutex>
+#include <optional>
+#include <span>
+#include <string>
+#include <string_view>
+#include <vector>
+
+namespace gn::handler::store {
+
+/// SQLite-backed IStore. Single connection, single mutex — the
+/// handler's outer mutex already serialises calls, but the
+/// backend keeps its own lock as defence-in-depth so a future
+/// caller that skips the handler doesn't see torn statement state.
+class SqliteStore final : public IStore {
+public:
+    /// @param db_path File path or `":memory:"`. The file is
+    ///                created on open if absent.
+    /// @throws std::runtime_error on `sqlite3_open` failure or
+    ///                schema migration error.
+    explicit SqliteStore(const std::string& db_path);
+
+    /// Optional clock injection for tests. Production callers omit
+    /// it and get the monotonic wall-clock wrapper.
+    SqliteStore(const std::string& db_path,
+                std::uint64_t (*clock)() noexcept);
+
+    ~SqliteStore() override;
+
+    SqliteStore(const SqliteStore&)            = delete;
+    SqliteStore& operator=(const SqliteStore&) = delete;
+
+    bool                 put(std::string_view, std::span<const std::uint8_t>,
+                              std::uint64_t, std::uint8_t) override;
+    std::optional<Entry> get(std::string_view) const override;
+    std::vector<Entry>   get_prefix(std::string_view, std::uint32_t) const override;
+    std::vector<Entry>   get_since(std::uint64_t, std::uint32_t)     const override;
+    bool                 del(std::string_view) override;
+    std::uint64_t        cleanup_expired(std::uint64_t) override;
+    std::size_t          size() const override;
+
+private:
+    /// Create the `store` table if absent. Idempotent; safe to
+    /// call against an existing DB carrying an older schema (the
+    /// schema is locked at v1.0; future migrations bump the user
+    /// version + run the migration here).
+    void create_schema();
+
+    /// Prepare every cached statement. Called once at open and
+    /// re-called after `sqlite3_close` + reopen in error-recovery
+    /// paths (not exercised in slice 2).
+    void prepare_statements();
+
+    /// Finalise every prepared statement. Called in the dtor and
+    /// during error-recovery.
+    void finalize_statements() noexcept;
+
+    /// Translate one sqlite row into an Entry. Column order
+    /// matches the SELECT statements below.
+    Entry row_to_entry(sqlite3_stmt* stmt) const;
+
+    sqlite3*       db_ = nullptr;
+
+    sqlite3_stmt*  stmt_put_     = nullptr;
+    sqlite3_stmt*  stmt_get_     = nullptr;
+    sqlite3_stmt*  stmt_prefix_  = nullptr;
+    sqlite3_stmt*  stmt_del_     = nullptr;
+    sqlite3_stmt*  stmt_since_   = nullptr;
+    sqlite3_stmt*  stmt_cleanup_ = nullptr;
+    sqlite3_stmt*  stmt_count_   = nullptr;
+
+    std::uint64_t (*clock_)() noexcept;
+    mutable std::mutex mu_;
+};
+
+}  // namespace gn::handler::store

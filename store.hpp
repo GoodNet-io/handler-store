@@ -138,6 +138,13 @@ using ClockNowUs = std::uint64_t (*)();
 /// where the wall-clock anchor is the only stable reference).
 [[nodiscard]] std::uint64_t default_clock_us() noexcept;
 
+/// Wall-clock variant that guarantees strict monotonic growth per
+/// process. `system_clock` resolves to microseconds on Linux so
+/// two consecutive `now()` calls can tie; this wrapper bumps the
+/// returned value by 1 µs in that case. Used by every backend that
+/// timestamps puts so `get_since` is observable as monotonic.
+[[nodiscard]] std::uint64_t monotonic_default_clock_us() noexcept;
+
 /// Per-subscription record kept inside the handler.
 struct Subscription {
     std::uint64_t        token;       ///< stable id returned to caller

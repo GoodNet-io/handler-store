@@ -21,14 +21,14 @@ std::uint64_t default_clock_us() noexcept {
 
 // ── MemoryStore ──────────────────────────────────────────────────────────
 
-namespace {
-/// Per-process monotonic counter for the wall-clock fallback. The
-/// default `system_clock` resolution is microseconds on Linux, so
-/// two consecutive puts CAN tie at the same `now()` reading. Tests
-/// that pivot on `get_since` need strictly-monotonic timestamps;
-/// bumping the counter on ties resolves the tie deterministically
-/// without forcing every caller through a mock clock.
-std::uint64_t monotonic_default_clock() noexcept {
+std::uint64_t monotonic_default_clock_us() noexcept {
+    /// Per-process monotonic counter for the wall-clock fallback.
+    /// The default `system_clock` resolution is microseconds on
+    /// Linux, so two consecutive puts CAN tie at the same `now()`
+    /// reading. Tests that pivot on `get_since` need strictly-
+    /// monotonic timestamps; bumping the counter on ties resolves
+    /// the tie deterministically without forcing every caller
+    /// through a mock clock.
     static std::atomic<std::uint64_t> last{0};
     std::uint64_t want = default_clock_us();
     std::uint64_t prev = last.load(std::memory_order_relaxed);
@@ -41,13 +41,12 @@ std::uint64_t monotonic_default_clock() noexcept {
         }
     }
 }
-}  // namespace
 
 MemoryStore::MemoryStore()
-    : clock_(&monotonic_default_clock) {}
+    : clock_(&monotonic_default_clock_us) {}
 
 MemoryStore::MemoryStore(std::uint64_t (*clock)() noexcept)
-    : clock_(clock != nullptr ? clock : &monotonic_default_clock) {}
+    : clock_(clock != nullptr ? clock : &monotonic_default_clock_us) {}
 
 bool MemoryStore::put(std::string_view key,
                       std::span<const std::uint8_t> value,

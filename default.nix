@@ -9,6 +9,7 @@
 , pkg-config
 , gtest
 , rapidcheck
+, sqlite
 , goodnet-core
 , lib
 }:
@@ -18,7 +19,7 @@ stdenv.mkDerivation {
   version = "1.0.0-rc1";
   src     = ./.;
   nativeBuildInputs = [ cmake ninja pkg-config ];
-  buildInputs       = [ goodnet-core gtest rapidcheck ];
+  buildInputs       = [ goodnet-core gtest rapidcheck sqlite ];
   cmakeFlags = [
     "-DCMAKE_BUILD_TYPE=Release"
     "-DBUILD_TESTING=OFF"
