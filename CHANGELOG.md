@@ -29,11 +29,10 @@ versions track the kernel ABI through `gn_handler_vtable_t` /
 - Wire contract published at `docs/contracts/store.md` in the
   kernel monorepo.
 
-### Planned (slices 2-4)
+### Roadmap
 
-- **Slice 2**: `SqliteStore` backend (file-backed, prepared
-  statements). Operator picks the backend via plugin manifest.
-- **Slice 3**: `gstore` CLI for ad-hoc lookups + bulk import /
-  export.
-- **Slice 4** (this graduation): plugin extracted to its own git
-  at `goodnet-io/handler-store`. — _DONE_.
+- `SqliteStore` backend (file-backed, prepared statements).
+  Operator picks the backend via plugin manifest.
+- `gstore` CLI for ad-hoc lookups + bulk import / export.
+- DHT backend (Kademlia over GoodNet itself).
+- Redis cluster backend.

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /// @file   plugins/handlers/store/tests/test_sqlite_backend.cpp
 /// @brief  SqliteStore — backend contract round-trips on the same
-///         test matrix that pins MemoryStore (slice 1 reference).
+///         test matrix that pins MemoryStore.
 ///         A handler driven through SqliteStore must observe the
 ///         same put/get/prefix/since/del/cleanup semantics so an
 ///         operator can swap backends via plugin manifest with no

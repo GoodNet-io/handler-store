@@ -63,7 +63,7 @@ struct Entry {
 
 /// Abstract backend. Reference implementations:
 ///   * `MemoryStore` — single-process, hash-map, in this header
-///   * `SqliteStore` (planned, slice 2) — file-backed, prepared stmts
+///   * `SqliteStore` — file-backed, prepared stmts (sqlite_backend.hpp)
 ///
 /// Every backend method is synchronous; the handler funnels every
 /// call through a single mutex so the backend never sees concurrent

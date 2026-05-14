@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /// @file   plugins/handlers/store/sqlite_backend.hpp
-/// @brief  File-backed IStore using SQLite. Slice 2.
+/// @brief  File-backed IStore using SQLite.
 ///
 /// One table `store(key BLOB PRIMARY KEY, value BLOB, timestamp_us
 /// INTEGER, ttl_s INTEGER, flags INTEGER)`. Prepared statements
@@ -68,7 +68,7 @@ private:
 
     /// Prepare every cached statement. Called once at open and
     /// re-called after `sqlite3_close` + reopen in error-recovery
-    /// paths (not exercised in slice 2).
+    /// paths (not exercised today).
     void prepare_statements();
 
     /// Finalise every prepared statement. Called in the dtor and
