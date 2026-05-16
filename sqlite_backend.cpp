@@ -66,21 +66,30 @@ constexpr const char* kStmtCleanup =
 constexpr const char* kStmtCount =
     "SELECT COUNT(*) FROM store;";
 
-/// Build the upper-bound BLOB for a prefix scan by appending 0xFF
-/// bytes until the result is lexicographically just past every
-/// possible suffix. 256 bytes is the key cap so the bound is at
-/// most `prefix + 256 × 0xFF` long.
+/// Build the upper-bound BLOB for a prefix scan by padding with
+/// 0xFF bytes up to `GN_STORE_KEY_MAX_LEN + 1` total length. The
+/// previous shape — `prefix || 0xFF` (single byte appended) —
+/// missed keys of the form `prefix || 0xFF || <anything>`,
+/// because BLOB comparison treats the longer string as greater
+/// when the shared prefix is equal. A stored key
+/// `abc\xff\x00` (5 bytes) compared against the bound `abc\xff`
+/// (4 bytes) returns "stored > bound" and falls outside the
+/// `key >= ? AND key < ?` range, even though `abc` is its
+/// prefix. Padding to one byte beyond the configured key cap
+/// guarantees the bound exceeds every valid key in the prefix
+/// family.
 std::vector<std::uint8_t>
 prefix_upper_bound(std::string_view prefix) {
     std::vector<std::uint8_t> out(prefix.begin(), prefix.end());
-    /// One extra 0xFF is enough — sqlite compares BLOBs byte by
-    /// byte, and `prefix || 0xFF` is greater than any
-    /// `prefix || <anything>` of length 1. For longer suffixes
-    /// the compare on the prefix bytes already returns equal then
-    /// continues into our 0xFF, which is the largest byte; deeper
-    /// keys compare smaller at that byte. Result: bound is tight
-    /// enough for the LIMIT-bounded paginated scan.
-    out.push_back(0xFF);
+    if (out.size() < static_cast<std::size_t>(GN_STORE_KEY_MAX_LEN) + 1) {
+        out.resize(static_cast<std::size_t>(GN_STORE_KEY_MAX_LEN) + 1, 0xFF);
+    } else {
+        /// Prefix already longer than the cap — no valid key can
+        /// match. Push a sentinel byte so the bind still receives
+        /// a non-empty BLOB and the query trivially returns zero
+        /// rows through the LIMIT path.
+        out.push_back(0xFF);
+    }
     return out;
 }
 
