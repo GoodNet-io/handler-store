@@ -7,7 +7,7 @@
 
 #include <store.hpp>
 
-#include <core/util/endian.hpp>
+#include <sdk/cpp/endian.hpp>
 #include <sdk/cpp/test/stub_host.hpp>
 #include <sdk/extensions/store.h>
 #include <sdk/host_api.h>
@@ -245,7 +245,7 @@ namespace wire {
     /// rather than exported because the tests are the authoritative
     /// consumer of the wire spec, so a future framing change must
     /// fail both sites and produce visible test diffs.
-    using gn::util::write_be;
+    using gn::endian::write_be;
 
     std::vector<std::uint8_t>
     put(std::uint64_t req, std::uint64_t ttl, std::uint8_t flags,
@@ -357,9 +357,9 @@ TEST(StoreWire, SubscribeOverWireFiresNotifyOnPut) {
 
     /// Subscribe conn=42 to prefix "peer/".
     std::vector<std::uint8_t> sub(16 + 5);
-    gn::util::write_be<std::uint64_t>({sub.data() + 0, 8}, 1ULL);  // req
+    gn::endian::write_be<std::uint64_t>({sub.data() + 0, 8}, 1ULL);  // req
     sub[8] = static_cast<std::uint8_t>(GN_STORE_QUERY_PREFIX);
-    gn::util::write_be<std::uint16_t>(
+    gn::endian::write_be<std::uint16_t>(
         {sub.data() + 10, 2}, static_cast<std::uint16_t>(5));
     std::memcpy(sub.data() + 16, "peer/", 5);
     auto env_sub = make_env(kMsgSubscribe, 42, sub);

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "store.hpp"
 
-#include <core/util/endian.hpp>
+#include <sdk/cpp/endian.hpp>
 
 #include <sdk/convenience.h>
 
@@ -136,8 +136,8 @@ constexpr std::size_t kHeaderResult = 12;  // req(8) + status(1) + pad(1) + entr
 constexpr std::size_t kEntryHeaderSize = 24;
 
 /// All multi-byte fields are big-endian per gnet-v1 wire convention.
-using gn::util::write_be;
-using gn::util::read_be;
+using gn::endian::write_be;
+using gn::endian::read_be;
 
 void append_entry(std::vector<std::uint8_t>& buf, const Entry& e) {
     const std::size_t off = buf.size();
