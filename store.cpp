@@ -332,9 +332,42 @@ StoreHandler::StoreHandler(const host_api_t* api,
     ext_vtable_.unsubscribe       = &StoreHandler::ext_unsubscribe;
     ext_vtable_.cleanup_expired   = &StoreHandler::ext_cleanup_expired;
     ext_vtable_.ctx               = this;
+
+    /// Prune wire-side subscriptions whose owning connection
+    /// disconnects without sending `STORE_UNSUBSCRIBE`. The kernel
+    /// publishes `GN_CONN_EVENT_DISCONNECTED` on the conn-state
+    /// channel — bind a callback that walks `subs_` and drops
+    /// every entry matching the disconnected `conn`. In-process
+    /// subscribers (callback-style with `conn_id == 0`) stay
+    /// untouched. Without this, peers that disconnect uncleanly
+    /// leave their subscription rows behind forever, eventually
+    /// pushing the handler over `max_subscriptions`.
+    if (api_ != nullptr && api_->subscribe_conn_state != nullptr) {
+        const auto rc = api_->subscribe_conn_state(
+            api_->host_ctx,
+            [](void* user, const gn_conn_event_t* ev) noexcept {
+                if (ev == nullptr ||
+                    ev->kind != GN_CONN_EVENT_DISCONNECTED) return;
+                auto* self = static_cast<StoreHandler*>(user);
+                std::lock_guard lk(self->mu_);
+                std::erase_if(self->subs_,
+                    [conn = ev->conn](const Subscription& s) {
+                        return s.conn_id == conn;
+                    });
+            },
+            this,
+            /*ud_destroy*/ nullptr,
+            &conn_state_sub_);
+        if (rc != GN_OK) conn_state_sub_ = GN_INVALID_SUBSCRIPTION_ID;
+    }
 }
 
-StoreHandler::~StoreHandler() = default;
+StoreHandler::~StoreHandler() {
+    if (api_ != nullptr && api_->unsubscribe != nullptr &&
+        conn_state_sub_ != GN_INVALID_SUBSCRIPTION_ID) {
+        (void)api_->unsubscribe(api_->host_ctx, conn_state_sub_);
+    }
+}
 
 std::size_t StoreHandler::subscription_count() const noexcept {
     std::lock_guard lk(mu_);

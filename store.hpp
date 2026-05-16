@@ -262,6 +262,14 @@ private:
     mutable std::mutex                mu_;
     std::vector<Subscription>         subs_;
     std::atomic<std::uint64_t>        next_token_{1};
+
+    /// Subscription handle returned by `host_api->subscribe_conn_state`
+    /// at handler construction. The conn-state callback prunes any
+    /// `subs_` entries whose `conn_id` matches a disconnect event so
+    /// wire-side subscribers that vanish without sending `unsubscribe`
+    /// don't accumulate. Released in the destructor through
+    /// `host_api->unsubscribe`.
+    gn_subscription_id_t              conn_state_sub_{0};
 };
 
 }  // namespace gn::handler::store
