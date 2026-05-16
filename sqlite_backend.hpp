@@ -19,6 +19,8 @@
 #include <sqlite3.h>
 
 #include <cstdint>
+#include <expected>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <span>
@@ -34,10 +36,24 @@ namespace gn::handler::store {
 /// caller that skips the handler doesn't see torn statement state.
 class SqliteStore final : public IStore {
 public:
+    /// Open or create the SQLite-backed store at @p db_path. The
+    /// factory wraps the throwing constructor below and surfaces
+    /// `sqlite3_open` / schema-migration failures as
+    /// `std::unexpected<std::string>` so the production plugin
+    /// path (which cannot rely on exception propagation across
+    /// the C ABI boundary) can fail closed cleanly.
+    [[nodiscard]] static std::expected<std::unique_ptr<SqliteStore>, std::string>
+        open(const std::string& db_path);
+
+    [[nodiscard]] static std::expected<std::unique_ptr<SqliteStore>, std::string>
+        open(const std::string& db_path,
+             std::uint64_t (*clock)() noexcept);
+
     /// @param db_path File path or `":memory:"`. The file is
     ///                created on open if absent.
     /// @throws std::runtime_error on `sqlite3_open` failure or
-    ///                schema migration error.
+    ///                schema migration error. Prefer the `open()`
+    ///                factory above for production paths.
     explicit SqliteStore(const std::string& db_path);
 
     /// Optional clock injection for tests. Production callers omit

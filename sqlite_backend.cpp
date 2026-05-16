@@ -95,6 +95,21 @@ prefix_upper_bound(std::string_view prefix) {
 
 }  // namespace
 
+std::expected<std::unique_ptr<SqliteStore>, std::string>
+SqliteStore::open(const std::string& db_path) {
+    return open(db_path, &monotonic_default_clock_us);
+}
+
+std::expected<std::unique_ptr<SqliteStore>, std::string>
+SqliteStore::open(const std::string& db_path,
+                  std::uint64_t (*clock)() noexcept) {
+    try {
+        return std::unique_ptr<SqliteStore>(new SqliteStore(db_path, clock));
+    } catch (const std::exception& e) {
+        return std::unexpected<std::string>(e.what());
+    }
+}
+
 SqliteStore::SqliteStore(const std::string& db_path)
     : SqliteStore(db_path, &monotonic_default_clock_us) {}
 
