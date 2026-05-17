@@ -13,7 +13,7 @@ versions track the kernel ABI through `gn_handler_vtable_t` /
   as a v1 GoodNet handler plugin.
 - `gn.store` extension vtable with `put / get / query / del /
   subscribe / unsubscribe / cleanup_expired` plus the `ctx` /
-  `_reserved` ABI footer. Size-prefixed per `abi-evolution.md`
+  `_reserved` ABI footer. Size-prefixed per `abi-evolution.en.md`
   §3, version `0x00010000`.
 - `MemoryStore` reference backend — hash-map, TTL, prefix sweep,
   since-timestamp filter. Per-process monotonic clock wrapper
@@ -26,7 +26,7 @@ versions track the kernel ABI through `gn_handler_vtable_t` /
 - 22 unit tests covering backend semantics, the extension
   surface, and the wire dispatcher (including a cross-conn
   wire-subscribe → notify path).
-- Wire contract published at `docs/contracts/store.md` in the
+- Wire contract published at `docs/contracts/store.en.md` in the
   kernel monorepo.
 
 ### Roadmap

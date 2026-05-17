@@ -15,7 +15,7 @@
 ///   * 0x0606  STORE_SYNC      — symmetric: bulk replication
 ///
 /// The on-wire framing is big-endian, length-prefixed binary; see
-/// `docs/contracts/store.md` for the byte-layout tables.
+/// `docs/contracts/store.en.md` for the byte-layout tables.
 
 #pragma once
 
@@ -130,7 +130,7 @@ private:
 };
 
 /// Wall-clock source. Production binds to `system_clock`; tests
-/// inject a deterministic mock. Per `clock.md` §2.
+/// inject a deterministic mock. Per `clock.en.md` §2.
 using ClockNowUs = std::uint64_t (*)();
 
 /// Default `ClockNowUs` reading microseconds from `system_clock`

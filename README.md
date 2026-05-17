@@ -32,7 +32,7 @@ same surface through the `gn.store` extension vtable.
 ## Wire format
 
 Full byte-layout tables live in
-[`docs/contracts/store.md`](../../../docs/contracts/store.en.md).
+[`docs/contracts/store.en.md`](../../../docs/contracts/store.en.md).
 TL;DR: big-endian length-prefixed binary, 256-byte key cap, 64 KiB
 value cap, 256 entry cap per query.
 
