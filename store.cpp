@@ -123,6 +123,21 @@ constexpr std::uint8_t kStatusOk           = 0;
 constexpr std::uint8_t kStatusBadSize      = 1;
 constexpr std::uint8_t kStatusNotFound     = 2;
 constexpr std::uint8_t kStatusBackendError = 3;
+constexpr std::uint8_t kStatusUnauthorized = 4;
+
+/// Treat an envelope's sender_pk as unauthenticated when every
+/// byte is zero. The gnet protocol layer stamps the Noise-
+/// authenticated remote pk on every deframed envelope, so a zero
+/// sender means the envelope did not ride the wire (kernel inject,
+/// loopback, or test fixture). Such envelopes bypass the ACL —
+/// they are implicitly trusted.
+[[nodiscard]] inline bool sender_is_authenticated(
+    const std::uint8_t pk[GN_PUBLIC_KEY_BYTES]) noexcept {
+    for (std::size_t i = 0; i < GN_PUBLIC_KEY_BYTES; ++i) {
+        if (pk[i] != 0) return true;
+    }
+    return false;
+}
 
 constexpr std::size_t kHeaderPut    = 24;  // req(8) + ttl(8) + flags(1) + pad(1) + key_len(2) + value_len(4)
 constexpr std::size_t kHeaderGet    = 28;  // req(8) + mode(1) + pad(1) + max(2) + pad(4) + since(8) + key_len(2) + pad(2)
@@ -396,10 +411,34 @@ gn_propagation_t StoreHandler::handle_message(const gn_message_t* env) {
             .ttl_s        = v->ttl_s,
             .flags        = v->flags,
         };
-        bool ok;
+        bool ok = false;
+        bool authorized = true;
         {
             std::lock_guard lk(mu_);
-            ok = backend_->put(v->key, v->value, v->ttl_s, v->flags);
+            /// First-writer-wins ACL. Wire-side writes carry an
+            /// authenticated `sender_pk` (the gnet protocol layer
+            /// stamps it from the conn's Noise-derived remote pk).
+            /// A subsequent write to the same key from a different
+            /// peer is rejected. Loopback / in-process / test
+            /// envelopes with zero sender_pk bypass the gate.
+            if (sender_is_authenticated(env->sender_pk)) {
+                OwnerPk caller{};
+                std::memcpy(caller.data(), env->sender_pk,
+                            GN_PUBLIC_KEY_BYTES);
+                const auto it = owners_.find(e_view.key);
+                if (it == owners_.end()) {
+                    owners_.emplace(e_view.key, caller);
+                } else if (it->second != caller) {
+                    authorized = false;
+                }
+            }
+            if (authorized) {
+                ok = backend_->put(v->key, v->value, v->ttl_s, v->flags);
+            }
+        }
+        if (!authorized) {
+            send_result(sender, v->request_id, kStatusUnauthorized, {});
+            return GN_PROPAGATION_CONSUMED;
         }
         send_result(sender, v->request_id,
                     ok ? kStatusOk : kStatusBackendError, {});
@@ -442,11 +481,34 @@ gn_propagation_t StoreHandler::handle_message(const gn_message_t* env) {
             return GN_PROPAGATION_CONSUMED;
         }
         std::optional<Entry> snap;
-        bool removed;
+        bool removed = false;
+        bool authorized = true;
         {
             std::lock_guard lk(mu_);
-            snap    = backend_->get(v->key);
-            removed = backend_->del(v->key);
+            /// Same ACL gate as PUT: only the original writer can
+            /// remove a key. Loopback / in-process / test deletes
+            /// (sender_pk == zero) bypass the gate.
+            if (sender_is_authenticated(env->sender_pk)) {
+                OwnerPk caller{};
+                std::memcpy(caller.data(), env->sender_pk,
+                            GN_PUBLIC_KEY_BYTES);
+                const std::string key_str{v->key};
+                const auto it = owners_.find(key_str);
+                if (it != owners_.end() && it->second != caller) {
+                    authorized = false;
+                }
+            }
+            if (authorized) {
+                snap    = backend_->get(v->key);
+                removed = backend_->del(v->key);
+                if (removed) {
+                    owners_.erase(std::string{v->key});
+                }
+            }
+        }
+        if (!authorized) {
+            send_result(sender, v->request_id, kStatusUnauthorized, {});
+            return GN_PROPAGATION_CONSUMED;
         }
         send_result(sender, v->request_id,
                     removed ? kStatusOk : kStatusNotFound, {});

@@ -289,6 +289,17 @@ gn_message_t make_env(std::uint32_t msg_id, gn_conn_id_t conn,
     return e;
 }
 
+/// Build an envelope with an explicit `sender_pk` so the ACL gate
+/// in the handler can distinguish writers. The single-byte marker
+/// is enough to disambiguate; the rest of the array stays zero.
+gn_message_t make_signed_env(std::uint32_t msg_id, gn_conn_id_t conn,
+                              std::span<const std::uint8_t> payload,
+                              std::uint8_t sender_marker) {
+    auto e = make_env(msg_id, conn, payload);
+    e.sender_pk[0] = sender_marker;
+    return e;
+}
+
 TEST(StoreWire, PutFollowedByGetReturnsValue) {
     StubHost host;
     auto api = make_stub_api(host);
@@ -386,6 +397,154 @@ TEST(StoreWire, SubscribeOverWireFiresNotifyOnPut) {
     }
     EXPECT_EQ(notify_count, 1);
     EXPECT_EQ(notify_to_42, 1);
+}
+
+// ── First-writer-wins ACL — sender_pk authority ──────────────────────────
+//
+// The handler binds each key to the Noise-authenticated sender_pk of its
+// initial wire-side PUT. Subsequent PUT/DELETE from a different peer get
+// `kStatusUnauthorized`; the original writer can update + delete freely.
+// Zero sender_pk (loopback / kernel inject / test fixture default) bypasses
+// the gate entirely.
+
+namespace {
+
+constexpr std::uint8_t kStatusOk           = 0;
+constexpr std::uint8_t kStatusNotFound     = 2;
+constexpr std::uint8_t kStatusUnauthorized = 4;
+
+[[nodiscard]] std::uint8_t result_status(
+    const std::vector<std::uint8_t>& payload) {
+    /// STORE_RESULT layout: req(8) + status(1) + ...
+    /// The single status byte lives at offset 8.
+    return payload.size() > 8 ? payload[8] : 0xFFu;
+}
+
+}  // namespace
+
+TEST(StoreAcl, SecondWriterOnSameKeyIsUnauthorized) {
+    StubHost host;
+    auto api = make_stub_api(host);
+    auto h   = make_handler(&api);
+
+    const auto put_bytes = wire::put(1, 0, 0, "k",
+        std::vector<std::uint8_t>{1, 2, 3});
+
+    auto env_alice = make_signed_env(kMsgPut, 100, put_bytes, /*alice*/ 0xA0);
+    EXPECT_EQ(h->handle_message(&env_alice), GN_PROPAGATION_CONSUMED);
+
+    auto env_bob = make_signed_env(kMsgPut, 200, put_bytes, /*bob*/ 0xB0);
+    EXPECT_EQ(h->handle_message(&env_bob), GN_PROPAGATION_CONSUMED);
+
+    std::lock_guard lk(host.mu);
+    ASSERT_EQ(host.sent_payloads.size(), 2u);
+    EXPECT_EQ(result_status(host.sent_payloads[0]), kStatusOk)
+        << "alice owns the key after her first PUT";
+    EXPECT_EQ(result_status(host.sent_payloads[1]), kStatusUnauthorized)
+        << "bob writing to the same key must be rejected";
+}
+
+TEST(StoreAcl, OriginalWriterCanUpdateOwnKey) {
+    StubHost host;
+    auto api = make_stub_api(host);
+    auto h   = make_handler(&api);
+
+    const auto first  = wire::put(1, 0, 0, "k",
+        std::vector<std::uint8_t>{1});
+    const auto second = wire::put(2, 0, 0, "k",
+        std::vector<std::uint8_t>{2});
+
+    auto env1 = make_signed_env(kMsgPut, 100, first,  0xA0);
+    auto env2 = make_signed_env(kMsgPut, 100, second, 0xA0);
+    EXPECT_EQ(h->handle_message(&env1), GN_PROPAGATION_CONSUMED);
+    EXPECT_EQ(h->handle_message(&env2), GN_PROPAGATION_CONSUMED);
+
+    std::lock_guard lk(host.mu);
+    ASSERT_EQ(host.sent_payloads.size(), 2u);
+    EXPECT_EQ(result_status(host.sent_payloads[0]), kStatusOk);
+    EXPECT_EQ(result_status(host.sent_payloads[1]), kStatusOk)
+        << "same writer must be allowed to update";
+}
+
+TEST(StoreAcl, NonOwnerDeleteIsUnauthorized) {
+    StubHost host;
+    auto api = make_stub_api(host);
+    auto h   = make_handler(&api);
+
+    const auto put_bytes = wire::put(1, 0, 0, "k",
+        std::vector<std::uint8_t>{1});
+    auto env_alice = make_signed_env(kMsgPut, 100, put_bytes, 0xA0);
+    EXPECT_EQ(h->handle_message(&env_alice), GN_PROPAGATION_CONSUMED);
+
+    std::vector<std::uint8_t> del(16 + 1);
+    gn::endian::write_be<std::uint64_t>({del.data() + 0, 8}, 2ULL);
+    gn::endian::write_be<std::uint16_t>(
+        {del.data() + 8, 2}, static_cast<std::uint16_t>(1));
+    del[16] = 'k';
+
+    auto env_bob_del = make_signed_env(kMsgDelete, 200, del, 0xB0);
+    EXPECT_EQ(h->handle_message(&env_bob_del), GN_PROPAGATION_CONSUMED);
+
+    std::lock_guard lk(host.mu);
+    ASSERT_EQ(host.sent_payloads.size(), 2u);
+    EXPECT_EQ(result_status(host.sent_payloads[1]), kStatusUnauthorized);
+}
+
+TEST(StoreAcl, OwnerDeleteReleasesKeyForNewWriter) {
+    StubHost host;
+    auto api = make_stub_api(host);
+    auto h   = make_handler(&api);
+
+    const auto put_a = wire::put(1, 0, 0, "k",
+        std::vector<std::uint8_t>{1});
+    auto env_a = make_signed_env(kMsgPut, 100, put_a, 0xA0);
+    EXPECT_EQ(h->handle_message(&env_a), GN_PROPAGATION_CONSUMED);
+
+    /// Alice deletes the key — ownership lapses.
+    std::vector<std::uint8_t> del(16 + 1);
+    gn::endian::write_be<std::uint64_t>({del.data() + 0, 8}, 2ULL);
+    gn::endian::write_be<std::uint16_t>(
+        {del.data() + 8, 2}, static_cast<std::uint16_t>(1));
+    del[16] = 'k';
+    auto env_a_del = make_signed_env(kMsgDelete, 100, del, 0xA0);
+    EXPECT_EQ(h->handle_message(&env_a_del), GN_PROPAGATION_CONSUMED);
+
+    /// Bob can now claim the freed key.
+    const auto put_b = wire::put(3, 0, 0, "k",
+        std::vector<std::uint8_t>{2});
+    auto env_b = make_signed_env(kMsgPut, 200, put_b, 0xB0);
+    EXPECT_EQ(h->handle_message(&env_b), GN_PROPAGATION_CONSUMED);
+
+    std::lock_guard lk(host.mu);
+    ASSERT_EQ(host.sent_payloads.size(), 3u);
+    EXPECT_EQ(result_status(host.sent_payloads[0]), kStatusOk);
+    EXPECT_EQ(result_status(host.sent_payloads[1]), kStatusOk);
+    EXPECT_EQ(result_status(host.sent_payloads[2]), kStatusOk)
+        << "bob writes to freed key after owner deleted";
+}
+
+TEST(StoreAcl, ZeroSenderPkBypassesGate) {
+    /// Loopback / kernel inject / test fixture default sender_pk
+    /// (all-zero) bypasses the ACL — the kernel is implicitly
+    /// trusted and the in-process callers via `put_local` have no
+    /// on-the-wire sender to authenticate.
+    StubHost host;
+    auto api = make_stub_api(host);
+    auto h   = make_handler(&api);
+
+    const auto put_bytes = wire::put(1, 0, 0, "k",
+        std::vector<std::uint8_t>{0xab});
+
+    /// Two PUTs with zero sender_pk under same key — both succeed.
+    auto env_a = make_env(kMsgPut, 100, put_bytes);
+    auto env_b = make_env(kMsgPut, 200, put_bytes);
+    EXPECT_EQ(h->handle_message(&env_a), GN_PROPAGATION_CONSUMED);
+    EXPECT_EQ(h->handle_message(&env_b), GN_PROPAGATION_CONSUMED);
+
+    std::lock_guard lk(host.mu);
+    ASSERT_EQ(host.sent_payloads.size(), 2u);
+    EXPECT_EQ(result_status(host.sent_payloads[0]), kStatusOk);
+    EXPECT_EQ(result_status(host.sent_payloads[1]), kStatusOk);
 }
 
 }  // namespace

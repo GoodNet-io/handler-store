@@ -22,6 +22,7 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <array>
 #include <mutex>
 #include <optional>
 #include <span>
@@ -262,6 +263,18 @@ private:
     mutable std::mutex                mu_;
     std::vector<Subscription>         subs_;
     std::atomic<std::uint64_t>        next_token_{1};
+
+    /// First-writer-wins ACL: each key records the Noise-
+    /// authenticated public key of its initial writer. Subsequent
+    /// wire-side PUT/DELETE from a different peer are rejected
+    /// with `kStatusUnauthorized`. Local (in-process) callers go
+    /// through `put_local` / `del_local` and bypass the gate —
+    /// they have no on-the-wire sender_pk and the kernel is
+    /// implicitly trusted. The map is in-memory only; on restart,
+    /// the next first-writer claims ownership again. A future
+    /// SqliteStore backend can persist this alongside values.
+    using OwnerPk = std::array<std::uint8_t, GN_PUBLIC_KEY_BYTES>;
+    std::unordered_map<std::string, OwnerPk> owners_;
 
     /// Subscription handle returned by `host_api->subscribe_conn_state`
     /// at handler construction. The conn-state callback prunes any
