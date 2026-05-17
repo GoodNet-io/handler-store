@@ -19,9 +19,16 @@ same surface through the `gn.store` extension vtable.
   (`sdk/extensions/store.h`).
 - Subscribe/notify on PUT + DELETE, both per-conn (wire) and
   per-callback (in-process).
+- First-writer-wins authority ACL: each key binds to the
+  Noise-authenticated `sender_pk` of its initial wire writer;
+  subsequent PUT/DELETE from a different peer is rejected with
+  status `kStatusUnauthorized` (4). Loopback / in-process /
+  test-fixture envelopes with all-zero sender_pk bypass the
+  gate — the kernel is implicitly trusted and the `gn.store`
+  extension callers have no on-the-wire sender to authenticate.
 - Unit tests covering backend semantics, the wire dispatcher,
-  and the extension surface — same contract matrix for both
-  backends so they are operator-swappable.
+  the extension surface, and the authority ACL — same contract
+  matrix for both backends so they are operator-swappable.
 
 ## On the roadmap
 
