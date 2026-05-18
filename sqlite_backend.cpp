@@ -2,11 +2,30 @@
 #include "sqlite_backend.hpp"
 
 #include <cstring>
+#include <new>
 #include <stdexcept>
 
 namespace gn::handler::store {
 
 namespace {
+
+/// Internal exception carrying a categorised `gn_result_t` from the
+/// throw site (DB open, pragma exec, schema migration, statement
+/// prepare) up to the `open()` factory's catch handler. Keeping the
+/// category at the throw site is the only way to avoid mapping
+/// every failure to `GN_ERR_OUT_OF_MEMORY` (or, worse, an opaque
+/// generic code) downstream — once the exception bubbles up as a
+/// plain `std::runtime_error` the category is lost.
+class OpenFailure : public std::runtime_error {
+public:
+    OpenFailure(gn_result_t code, std::string message)
+        : std::runtime_error(std::move(message)), code_{code} {}
+
+    [[nodiscard]] gn_result_t code() const noexcept { return code_; }
+
+private:
+    gn_result_t code_;
+};
 
 constexpr const char* kCreateSchema =
     "CREATE TABLE IF NOT EXISTS store ("
@@ -95,18 +114,35 @@ prefix_upper_bound(std::string_view prefix) {
 
 }  // namespace
 
-std::expected<std::unique_ptr<SqliteStore>, std::string>
+std::expected<std::unique_ptr<SqliteStore>, OpenError>
 SqliteStore::open(const std::string& db_path) {
     return open(db_path, &monotonic_default_clock_us);
 }
 
-std::expected<std::unique_ptr<SqliteStore>, std::string>
+std::expected<std::unique_ptr<SqliteStore>, OpenError>
 SqliteStore::open(const std::string& db_path,
                   std::uint64_t (*clock)() noexcept) {
+    /// Catch ladder maps each throw category to a stable
+    /// `gn_result_t` code so the production plugin path can branch
+    /// on the failure category. The previous shape coalesced every
+    /// exception into a single string (and a hypothetical kernel
+    /// adapter mapping that to `GN_ERR_OUT_OF_MEMORY` would be
+    /// wrong — DB-open / pragma / schema / FS-permission failures
+    /// are state errors, not memory exhaustion). `OpenFailure`
+    /// carries the category from the ctor throw site to here;
+    /// `std::bad_alloc` is the genuine OOM signal; everything
+    /// else is a true escapee that we surface as
+    /// `GN_ERR_INTERNAL`.
     try {
         return std::unique_ptr<SqliteStore>(new SqliteStore(db_path, clock));
+    } catch (const OpenFailure& e) {
+        return std::unexpected<OpenError>({e.code(), e.what()});
+    } catch (const std::bad_alloc& e) {
+        return std::unexpected<OpenError>(
+            {GN_ERR_OUT_OF_MEMORY, e.what()});
     } catch (const std::exception& e) {
-        return std::unexpected<std::string>(e.what());
+        return std::unexpected<OpenError>(
+            {GN_ERR_INTERNAL, e.what()});
     }
 }
 
@@ -121,14 +157,23 @@ SqliteStore::SqliteStore(const std::string& db_path,
             db_ ? sqlite3_errmsg(db_) : "sqlite3_open failed";
         if (db_) sqlite3_close(db_);
         db_ = nullptr;
-        throw std::runtime_error("SqliteStore: " + err);
+        /// DB-open failure: bad path, directory missing, FS
+        /// permission denied, file locked by another process,
+        /// disk full on initial create. None of these are memory
+        /// exhaustion — they are environmental / state errors.
+        throw OpenFailure(GN_ERR_INVALID_STATE, "SqliteStore: " + err);
     }
     char* err = nullptr;
     if (sqlite3_exec(db_, kPragmas, nullptr, nullptr, &err) != SQLITE_OK) {
         const std::string msg = err ? err : "pragma exec failed";
         sqlite3_free(err);
         sqlite3_close(db_);
-        throw std::runtime_error("SqliteStore: " + msg);
+        db_ = nullptr;
+        /// PRAGMA exec failure: most often the DB file exists but
+        /// is locked or corrupt (WAL mode toggle on a stale
+        /// journal, foreign_keys flip on a half-migrated schema).
+        /// Same state-error category as the open path.
+        throw OpenFailure(GN_ERR_INVALID_STATE, "SqliteStore: " + msg);
     }
     create_schema();
     prepare_statements();
@@ -145,7 +190,11 @@ void SqliteStore::create_schema() {
         != SQLITE_OK) {
         const std::string msg = err ? err : "create_schema failed";
         sqlite3_free(err);
-        throw std::runtime_error("SqliteStore: " + msg);
+        /// Schema migration failure: existing DB carries an
+        /// incompatible schema, or the kernel saw an `IO_ERR`
+        /// back from sqlite (disk full, FS read-only). State /
+        /// environmental error, never OOM.
+        throw OpenFailure(GN_ERR_INVALID_STATE, "SqliteStore: " + msg);
     }
 }
 
@@ -154,7 +203,12 @@ void SqliteStore::prepare_statements() {
     /// hiding which statement maps to which slot.
     auto prep = [this](sqlite3_stmt*& slot, const char* sql) {
         if (sqlite3_prepare_v2(db_, sql, -1, &slot, nullptr) != SQLITE_OK) {
-            throw std::runtime_error(
+            /// `sqlite3_prepare_v2` fails when the SQL is invalid
+            /// against the current schema (e.g. a future migration
+            /// added a column that this build expects but the DB
+            /// file lacks). State error — same category as
+            /// schema migration.
+            throw OpenFailure(GN_ERR_INVALID_STATE,
                 std::string{"SqliteStore: prepare failed: "}
                 + sqlite3_errmsg(db_));
         }

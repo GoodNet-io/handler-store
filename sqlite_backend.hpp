@@ -16,6 +16,8 @@
 
 #include "store.hpp"
 
+#include <sdk/types.h>
+
 #include <sqlite3.h>
 
 #include <cstdint>
@@ -30,6 +32,19 @@
 
 namespace gn::handler::store {
 
+/// Categorised failure from `SqliteStore::open`. The `code` field
+/// carries a stable `gn_result_t` enumerator so the production
+/// plugin path can branch on the failure category without parsing
+/// the human-readable `message` — DB-open / schema-migration /
+/// FS-permission errors land on `GN_ERR_INVALID_STATE` (closest
+/// match in `sdk/types.h`; there is no dedicated IO_ERROR code),
+/// genuine memory exhaustion lands on `GN_ERR_OUT_OF_MEMORY`,
+/// every other escaped exception lands on `GN_ERR_INTERNAL`.
+struct OpenError {
+    gn_result_t code;
+    std::string message;
+};
+
 /// SQLite-backed IStore. Single connection, single mutex — the
 /// handler's outer mutex already serialises calls, but the
 /// backend keeps its own lock as defence-in-depth so a future
@@ -38,14 +53,16 @@ class SqliteStore final : public IStore {
 public:
     /// Open or create the SQLite-backed store at @p db_path. The
     /// factory wraps the throwing constructor below and surfaces
-    /// `sqlite3_open` / schema-migration failures as
-    /// `std::unexpected<std::string>` so the production plugin
-    /// path (which cannot rely on exception propagation across
-    /// the C ABI boundary) can fail closed cleanly.
-    [[nodiscard]] static std::expected<std::unique_ptr<SqliteStore>, std::string>
+    /// `sqlite3_open` / schema-migration / FS-permission failures
+    /// as `std::unexpected<OpenError>` carrying both a categorised
+    /// `gn_result_t` and the underlying diagnostic — the
+    /// production plugin path (which cannot rely on exception
+    /// propagation across the C ABI boundary) can fail closed
+    /// cleanly and surface a stable code to the caller.
+    [[nodiscard]] static std::expected<std::unique_ptr<SqliteStore>, OpenError>
         open(const std::string& db_path);
 
-    [[nodiscard]] static std::expected<std::unique_ptr<SqliteStore>, std::string>
+    [[nodiscard]] static std::expected<std::unique_ptr<SqliteStore>, OpenError>
         open(const std::string& db_path,
              std::uint64_t (*clock)() noexcept);
 

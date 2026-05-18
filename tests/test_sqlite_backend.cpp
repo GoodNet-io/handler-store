@@ -103,6 +103,40 @@ TEST(SqliteStore_Prefix, RespectsMaxResults) {
     EXPECT_EQ(s.get_prefix("k", 3).size(), 3u);
 }
 
+TEST(SqliteStore_Prefix, ReturnsKeysWhenPrefixEndsIn0xFF) {
+    /// Regression: a naive `upper = prefix; ++upper.back();` upper-
+    /// bound construction wraps to `0x00` when the last byte is
+    /// `0xFF` (or, worse, returns an upper that compares lower than
+    /// the prefix). The current implementation pads to one byte
+    /// beyond `GN_STORE_KEY_MAX_LEN` with `0xFF` so the bound
+    /// exceeds every key in the prefix family by construction.
+    SqliteStore s(":memory:");
+    /// Prefix is a single `0xFF` byte — the wraparound case.
+    const std::string prefix{"\xff", 1};
+    const std::string k1 = prefix + std::string{"\x00", 1};   ///< ff 00
+    const std::string k2 = prefix + std::string{"\x7f", 1};   ///< ff 7f
+    const std::string k3 = prefix + std::string{"\xff", 1};   ///< ff ff
+    /// Out-of-family key — must NOT be returned.
+    const std::string other{"\xfe\xff", 2};
+
+    ASSERT_TRUE(s.put(k1,    std::vector<std::uint8_t>{1}, 0, 0));
+    ASSERT_TRUE(s.put(k2,    std::vector<std::uint8_t>{2}, 0, 0));
+    ASSERT_TRUE(s.put(k3,    std::vector<std::uint8_t>{3}, 0, 0));
+    ASSERT_TRUE(s.put(other, std::vector<std::uint8_t>{4}, 0, 0));
+    /// Plain `0xFF`-only key — also in the family (the prefix
+    /// itself is a valid key).
+    ASSERT_TRUE(s.put(prefix, std::vector<std::uint8_t>{5}, 0, 0));
+
+    const auto hits = s.get_prefix(prefix, 256);
+    /// Expect every `0xff*`-prefixed key, not `0xfe*`.
+    EXPECT_EQ(hits.size(), 4u);
+    bool saw_other = false;
+    for (const auto& e : hits) {
+        if (e.key == other) saw_other = true;
+    }
+    EXPECT_FALSE(saw_other);
+}
+
 TEST(SqliteStore_Delete, RemovesEntry) {
     SqliteStore s(":memory:");
     ASSERT_TRUE(s.put("k", std::vector<std::uint8_t>{1}, 0, 0));
@@ -179,6 +213,25 @@ TEST(SqliteStore_Constructor, RejectsInvalidPath) {
     EXPECT_THROW(
         SqliteStore("/this/path/should/never/exist/store.sqlite3"),
         std::runtime_error);
+}
+
+TEST(SqliteStore_Open, FactoryClassifiesBadPathAsInvalidState) {
+    /// The factory must categorise DB-open / FS-permission /
+    /// schema-migration failures as `GN_ERR_INVALID_STATE`, never
+    /// the catch-all `GN_ERR_OUT_OF_MEMORY` the previous shape
+    /// would have implied through a generic exception → string
+    /// mapping. Memory exhaustion alone earns the OOM code.
+    auto result = SqliteStore::open(
+        "/this/path/should/never/exist/store.sqlite3");
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, GN_ERR_INVALID_STATE);
+    EXPECT_FALSE(result.error().message.empty());
+}
+
+TEST(SqliteStore_Open, FactorySucceedsForInMemory) {
+    auto result = SqliteStore::open(":memory:");
+    ASSERT_TRUE(result.has_value());
+    EXPECT_NE(result.value().get(), nullptr);
 }
 
 }  // namespace
