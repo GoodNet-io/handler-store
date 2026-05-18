@@ -364,11 +364,7 @@ StoreHandler::StoreHandler(const host_api_t* api,
                 if (ev == nullptr ||
                     ev->kind != GN_CONN_EVENT_DISCONNECTED) return;
                 auto* self = static_cast<StoreHandler*>(user);
-                std::lock_guard lk(self->mu_);
-                std::erase_if(self->subs_,
-                    [conn = ev->conn](const Subscription& s) {
-                        return s.conn_id == conn;
-                    });
+                (void)self->detach_conn(ev->conn);
             },
             this,
             /*ud_destroy*/ nullptr,
@@ -378,10 +374,26 @@ StoreHandler::StoreHandler(const host_api_t* api,
 }
 
 StoreHandler::~StoreHandler() {
+    /// Unsubscribe from the kernel conn-state channel FIRST: once
+    /// `unsubscribe` returns, the kernel guarantees no more
+    /// conn-state callbacks will fire against `this`, so the subs_
+    /// drain below cannot race the lambda.
     if (api_ != nullptr && api_->unsubscribe != nullptr &&
         conn_state_sub_ != GN_INVALID_SUBSCRIPTION_ID) {
         (void)api_->unsubscribe(api_->host_ctx, conn_state_sub_);
+        conn_state_sub_ = GN_INVALID_SUBSCRIPTION_ID;
     }
+    /// Explicitly drop every subscription row before the implicit
+    /// `subs_` destruction. The vector destructor would release the
+    /// storage anyway, but observers reading `subscription_count()`
+    /// across the destroy boundary would otherwise see leftover
+    /// entries up until the vector's own dtor runs. Draining here
+    /// keeps the lifecycle observable as "destroy releases
+    /// everything" and matches what the conn-state DISCONNECTED
+    /// callback already does for the per-conn detach path.
+    std::lock_guard lk(mu_);
+    subs_.clear();
+    owners_.clear();
 }
 
 std::size_t StoreHandler::subscription_count() const noexcept {
@@ -690,6 +702,21 @@ void StoreHandler::unsubscribe_local(std::uint64_t token) noexcept {
     subs_.erase(std::remove_if(subs_.begin(), subs_.end(),
         [token](const Subscription& s) { return s.token == token; }),
         subs_.end());
+}
+
+std::size_t StoreHandler::detach_conn(gn_conn_id_t conn) noexcept {
+    /// Wire-side subscribers always carry their owning `conn_id`;
+    /// in-process subscribers register with `conn_id == 0` and stay
+    /// untouched here — they detach explicitly through
+    /// `unsubscribe_local(token)`. Treat a zero-conn DISCONNECT
+    /// from the kernel as a no-op so a defensive caller cannot
+    /// accidentally wipe every local subscriber.
+    if (conn == 0) return 0;
+    std::lock_guard lk(mu_);
+    const auto before = subs_.size();
+    std::erase_if(subs_,
+        [conn](const Subscription& s) { return s.conn_id == conn; });
+    return before - subs_.size();
 }
 
 std::uint64_t StoreHandler::cleanup_expired_local() {

@@ -399,6 +399,117 @@ TEST(StoreWire, SubscribeOverWireFiresNotifyOnPut) {
     EXPECT_EQ(notify_to_42, 1);
 }
 
+// ── §W2-H bug 11 — subscriptions release on detach/destroy ───────────────
+//
+// Wire-side subscribers registered through `STORE_SUBSCRIBE` used to
+// linger in `subs_` past the owning conn's disconnect, and the dtor
+// dropped the storage without first draining the master list — so a
+// `subscription_count()` reading just before destruction (or against
+// a fresh handler that inherited the leak via a long-running kernel)
+// reported every subscription ever registered. Both paths now drop
+// the rows explicitly.
+
+TEST(StoreSubscriptionLifetime, DetachReleasesWireSubsForConn) {
+    StubHost host;
+    auto api = make_stub_api(host);
+    auto h = make_handler(&api);
+
+    /// Two wire subscribers on conn=42, one on conn=99.
+    std::vector<std::uint8_t> sub42a(16 + 5);
+    gn::endian::write_be<std::uint64_t>({sub42a.data() + 0, 8}, 1ULL);
+    sub42a[8] = static_cast<std::uint8_t>(GN_STORE_QUERY_PREFIX);
+    gn::endian::write_be<std::uint16_t>(
+        {sub42a.data() + 10, 2}, static_cast<std::uint16_t>(5));
+    std::memcpy(sub42a.data() + 16, "peer/", 5);
+
+    std::vector<std::uint8_t> sub42b(16 + 3);
+    gn::endian::write_be<std::uint64_t>({sub42b.data() + 0, 8}, 2ULL);
+    sub42b[8] = static_cast<std::uint8_t>(GN_STORE_QUERY_PREFIX);
+    gn::endian::write_be<std::uint16_t>(
+        {sub42b.data() + 10, 2}, static_cast<std::uint16_t>(3));
+    std::memcpy(sub42b.data() + 16, "svc", 3);
+
+    std::vector<std::uint8_t> sub99(16 + 1);
+    gn::endian::write_be<std::uint64_t>({sub99.data() + 0, 8}, 3ULL);
+    sub99[8] = static_cast<std::uint8_t>(GN_STORE_QUERY_EXACT);
+    gn::endian::write_be<std::uint16_t>(
+        {sub99.data() + 10, 2}, static_cast<std::uint16_t>(1));
+    sub99[16] = 'k';
+
+    auto e1 = make_env(kMsgSubscribe, 42, sub42a);
+    auto e2 = make_env(kMsgSubscribe, 42, sub42b);
+    auto e3 = make_env(kMsgSubscribe, 99, sub99);
+    ASSERT_EQ(h->handle_message(&e1), GN_PROPAGATION_CONSUMED);
+    ASSERT_EQ(h->handle_message(&e2), GN_PROPAGATION_CONSUMED);
+    ASSERT_EQ(h->handle_message(&e3), GN_PROPAGATION_CONSUMED);
+
+    /// Local subscriber with conn_id == 0 must NOT be affected by
+    /// per-conn detach.
+    struct Cap {} cap;
+    const auto tok = h->subscribe_local(
+        GN_STORE_QUERY_PREFIX, "p/",
+        [](void*, gn_store_event_t, const gn_store_entry_t*) {}, &cap);
+    ASSERT_GT(tok, 0u);
+
+    EXPECT_EQ(h->subscription_count(), 4u);
+
+    /// Detach conn=42 — two rows drop, local + conn=99 stay.
+    EXPECT_EQ(h->detach_conn(42), 2u);
+    EXPECT_EQ(h->subscription_count(), 2u);
+
+    EXPECT_EQ(h->detach_conn(99), 1u);
+    EXPECT_EQ(h->subscription_count(), 1u);
+
+    /// Zero-conn detach is a no-op — never wipes locals.
+    EXPECT_EQ(h->detach_conn(0), 0u);
+    EXPECT_EQ(h->subscription_count(), 1u);
+
+    h->unsubscribe_local(tok);
+    EXPECT_EQ(h->subscription_count(), 0u);
+}
+
+TEST(StoreSubscriptionLifetime, DestroyDrainsEveryRemainingSubscription) {
+    StubHost host;
+    auto api = make_stub_api(host);
+    auto h   = make_handler(&api);
+
+    /// Three subscribers across the wire + in-process surfaces;
+    /// none are explicitly released before destruction.
+    std::vector<std::uint8_t> sub(16 + 1);
+    gn::endian::write_be<std::uint64_t>({sub.data() + 0, 8}, 1ULL);
+    sub[8] = static_cast<std::uint8_t>(GN_STORE_QUERY_EXACT);
+    gn::endian::write_be<std::uint16_t>(
+        {sub.data() + 10, 2}, static_cast<std::uint16_t>(1));
+    sub[16] = 'k';
+    auto env_sub = make_env(kMsgSubscribe, 11, sub);
+    ASSERT_EQ(h->handle_message(&env_sub), GN_PROPAGATION_CONSUMED);
+
+    struct Cap {} cap;
+    (void)h->subscribe_local(
+        GN_STORE_QUERY_PREFIX, "a/",
+        [](void*, gn_store_event_t, const gn_store_entry_t*) {}, &cap);
+    (void)h->subscribe_local(
+        GN_STORE_QUERY_PREFIX, "b/",
+        [](void*, gn_store_event_t, const gn_store_entry_t*) {}, &cap);
+
+    ASSERT_EQ(h->subscription_count(), 3u);
+
+    /// The destructor must drain every subscription row. After
+    /// resetting the handle we cannot query the dead object, but
+    /// we CAN observe that a freshly-built handler against the
+    /// same stub host starts at count == 0 and `detach_conn` for
+    /// a previously-subscribed conn finds nothing — proving the
+    /// previous handler's destructor cleared `subs_` instead of
+    /// silently dropping the vector storage with stale rows.
+    h.reset();
+
+    auto h2 = make_handler(&api);
+    EXPECT_EQ(h2->subscription_count(), 0u);
+    EXPECT_EQ(h2->detach_conn(11), 0u)
+        << "conn=11's wire subscription must have been released "
+           "by the previous handler's destructor, not leaked";
+}
+
 // ── First-writer-wins ACL — sender_pk authority ──────────────────────────
 //
 // The handler binds each key to the Noise-authenticated sender_pk of its

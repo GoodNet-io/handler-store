@@ -210,6 +210,15 @@ public:
 
     void unsubscribe_local(std::uint64_t token) noexcept;
 
+    /// Drop every wire-side subscription whose owning conn matches
+    /// @p conn. In-process subscribers (`conn_id == 0`) are left
+    /// alone. Returns the number of subscription rows released so
+    /// callers / tests can assert the detach actually pruned the
+    /// master list. Bound to the conn-state DISCONNECTED channel
+    /// inside the ctor; also exposed publicly so tests can drive
+    /// the detach path without standing up a full conn-state stub.
+    std::size_t detach_conn(gn_conn_id_t conn) noexcept;
+
     [[nodiscard]] std::uint64_t cleanup_expired_local();
 
     /// Vtable accessors for `GN_HANDLER_PLUGIN`.
